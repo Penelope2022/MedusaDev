@@ -1,0 +1,150 @@
+name: MedusaDev - migrar PostgreSQL privado
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        description: "Verificar ligação ou aplicar migrações oficiais do Medusa"
+        required: true
+        default: verify
+        options:
+          - verify
+          - migrate
+      project_ref:
+        description: "Escrever exactamente a referência do projecto MedusaDev Supabase"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: medusadev-production-database
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: medusadev-database
+    env:
+      DATABASE_URL: ${{ secrets.MEDUSADEV_DATABASE_URL }}
+      MEDUSADEV_PROJECT_REF: gvvoulnmomdiqldplagj
+      PGSSLMODE: require
+      NODE_ENV: development
+      REDIS_URL: redis://localhost:6379
+      STORE_CORS: http://localhost:8000
+      ADMIN_CORS: http://localhost:9000
+      AUTH_CORS: http://localhost:8000,http://localhost:9000
+      JWT_SECRET: temporary-only-for-database-migrations-never-production
+      COOKIE_SECRET: temporary-only-for-database-migrations-never-production
+      MEDUSA_WORKER_MODE: shared
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Verify explicit project confirmation
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.project_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "$MEDUSADEV_PROJECT_REF" ]; then
+            echo "Project ref does not match the dedicated MedusaDev database."
+            exit 1
+          fi
+      - name: Check private database URL identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/verify-medusadev-db.mjs
+      - name: Install postgres CLI
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+      - name: Check database and default privileges (read only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_db="$(psql "$DATABASE_URL" -X -A -t -v ON_ERROR_STOP=1 -c 'SELECT current_database()')"
+          if [ "$actual_db" != "postgres" ]; then
+            echo "Unexpected database."
+            exit 1
+          fi
+          remaining="$(psql "$DATABASE_URL" -X -A -t -v ON_ERROR_STOP=1 -c "
+            SELECT count(*)
+            FROM pg_default_acl AS d,
+            LATERAL aclexplode(d.defaclacl) AS a
+            WHERE d.defaclrole='postgres'::regrole
+              AND d.defaclnamespace='public'::regnamespace
+              AND (a.grantee=0
+                   OR a.grantee IN (
+                     'anon'::regrole,
+                     'authenticated'::regrole,
+                     'service_role'::regrole
+                   ));")"
+          if [ "$remaining" != "0" ]; then
+            echo "Aborting: automatic public access grants are still present."
+            exit 1
+          fi
+          current_tables="$(psql "$DATABASE_URL" -X -A -t -v ON_ERROR_STOP=1 -c "
+            SELECT count(*) FROM information_schema.tables
+            WHERE table_schema='public' AND table_type='BASE TABLE';")"
+          if [ "$current_tables" -gt 0 ]; then
+            product_found="$(psql "$DATABASE_URL" -X -A -t -v ON_ERROR_STOP=1 -c "
+              SELECT COUNT(*) FROM information_schema.tables
+              WHERE table_schema='public' AND table_name='product';")"
+            if [ "$product_found" != "1" ]; then
+              echo "Database has public tables but is not recognised as Medusa; refusing migration."
+              exit 1
+            fi
+          fi
+          echo "Database identity, default privileges and existing schema checks passed."
+      - name: Install pnpm
+        if: inputs.operation == 'migrate'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
+      - name: Setup Node
+        if: inputs.operation == 'migrate'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Install Medusa dependencies
+        if: inputs.operation == 'migrate'
+        run: pnpm install --frozen-lockfile
+      - name: Apply official Medusa migrations to MedusaDev only
+        if: inputs.operation == 'migrate'
+        run: pnpm --filter @dtc/backend exec medusa db:migrate
+      - name: Verify Medusa tables and no anonymous grants
+        if: inputs.operation == 'migrate'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tables="$(psql "$DATABASE_URL" -X -A -t -v ON_ERROR_STOP=1 -c "
+            SELECT count(*) FROM information_schema.tables
+            WHERE table_schema='public' AND table_name IN ('product','customer','cart','order');")"
+          if [ "$tables" -lt 3 ]; then
+            echo "Migration did not create the expected Medusa commerce tables."
+            exit 1
+          fi
+          exposed="$(psql "$DATABASE_URL" -X -A -t -v ON_ERROR_STOP=1 -c "
+            SELECT count(*) FROM information_schema.table_privileges
+            WHERE table_schema='public'
+              AND grantee IN ('anon','authenticated','service_role');")"
+          if [ "$exposed" != "0" ]; then
+            echo "SECURITY ALERT: Some Medusa tables have Data API role grants."
+            exit 1
+          fi
+          echo "Official Medusa schema exists; no public Data API grants found."
