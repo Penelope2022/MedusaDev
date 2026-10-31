@@ -1,11 +1,21 @@
 name: Verificar MedusaDev
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/ci-medusadev.yml"
+      - "apps/**"
+      - "docker-compose.yml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
   push:
     branches: [main]
     paths:
       - ".github/workflows/ci-medusadev.yml"
       - "apps/**"
+      - "docker-compose.yml"
       - "package.json"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
@@ -15,23 +25,91 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: Instalar dependências e compilar backend
+  smoke:
+    name: Compilar, migrar e testar API
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: medusa_ci
+          POSTGRES_PASSWORD: medusa_ci_local_only
+          POSTGRES_DB: medusadev_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U medusa_ci -d medusadev_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: development
+      DATABASE_URL: postgres://medusa_ci:medusa_ci_local_only@localhost:5432/medusadev_test
+      REDIS_URL: redis://localhost:6379
+      STORE_CORS: http://localhost:8000
+      ADMIN_CORS: http://localhost:9000
+      AUTH_CORS: http://localhost:8000,http://localhost:9000
+      JWT_SECRET: ephemeral-github-ci-only-never-use-in-production
+      COOKIE_SECRET: ephemeral-github-ci-only-never-use-in-production
+      MEDUSA_WORKER_MODE: shared
+      DISABLE_MEDUSA_ADMIN: "false"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Instalar pnpm
+      - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10.11.1
-      - name: Configurar Node.js
+      - name: Setup Node 24
         uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: pnpm
-      - name: Instalar dependências
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Compilar backend Medusa
+      - name: Build Medusa backend
         run: pnpm --filter @dtc/backend build
+      - name: Run Medusa migrations
+        run: pnpm --filter @dtc/backend exec medusa db:migrate
+      - name: Smoke test running backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --filter @dtc/backend dev > /tmp/medusadev-backend.log 2>&1 &
+          BACKEND_PID=$!
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS --max-time 3 http://127.0.0.1:9000/health > /tmp/medusadev-health.txt; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+              echo "Backend process terminated unexpectedly."
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "1" ]; then
+            echo "Medusa backend did not become healthy."
+            tail -n 150 /tmp/medusadev-backend.log
+            exit 1
+          fi
+          cat /tmp/medusadev-health.txt
+      - name: Upload logs if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: medusadev-backend-smoke-logs
+          path: /tmp/medusadev-backend.log
+          if-no-files-found: ignore
+          retention-days: 3

@@ -1,0 +1,32 @@
+# For local development only. Never use these example passwords in production.
+name: medusadev
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: medusadev
+      POSTGRES_PASSWORD: medusadev_local_only
+      POSTGRES_DB: medusadev
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - medusadev_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medusadev -d medusadev"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - medusadev_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  medusadev_pg_data:
+  medusadev_redis_data:
