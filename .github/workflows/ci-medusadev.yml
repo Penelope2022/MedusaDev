@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/ci-medusadev.yml"
+      - ".github/workflows/migrate-supabase-medusadev.yml"
+      - "scripts/**"
+      - "docs/**"
       - "apps/**"
       - "docker-compose.yml"
       - "package.json"
@@ -14,6 +17,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/ci-medusadev.yml"
+      - ".github/workflows/migrate-supabase-medusadev.yml"
+      - "scripts/**"
+      - "docs/**"
       - "apps/**"
       - "docker-compose.yml"
       - "package.json"
@@ -66,7 +72,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install pnpm
+      - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10.11.1
@@ -75,6 +81,8 @@ jobs:
         with:
           node-version: "24"
           cache: pnpm
+      - name: Test database target validation
+        run: node --test scripts/verify-medusadev-db.test.mjs
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Build Medusa backend
