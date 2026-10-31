@@ -1,0 +1,73 @@
+name: Importar Medusa DTC Starter
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/import-medusa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    name: Copiar o starter oficial com licença e proveniência
+    if: github.repository == 'Penelope2022/MedusaDev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obter o MedusaDev
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Importar o Medusa oficial sem apagar o workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f apps/backend/package.json ] && [ -f apps/storefront/package.json ]; then
+            echo "Medusa DTC Starter já presente; importação não repetida."
+            exit 0
+          fi
+
+          git clone --depth 1 --branch main https://github.com/medusajs/dtc-starter.git /tmp/medusa-dtc-starter
+          UPSTREAM_SHA="$(git -C /tmp/medusa-dtc-starter rev-parse HEAD)"
+          rsync -a --exclude='.git/' --exclude='.github/workflows/' \
+            /tmp/medusa-dtc-starter/ ./
+
+          cat > MEDUSADEV_UPSTREAM.md <<EOF
+          # Proveniência do código
+
+          - Repositório de origem: https://github.com/medusajs/dtc-starter
+          - Branch de origem: main
+          - Commit importado: ${UPSTREAM_SHA}
+          - Licença do starter: MIT, conforme ficheiro LICENSE preservado
+          - Motor Medusa: distribuído como dependências do backend
+
+          Este projecto pode incluir outras dependências com licenças próprias.
+          Antes de vender produtos de terceiros, conferir as licenças respectivas.
+          EOF
+
+          test -f LICENSE
+          test -f apps/backend/package.json
+          test -f apps/storefront/package.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração a enviar."
+          else
+            git commit -m "feat: importar Medusa DTC Starter oficial (${UPSTREAM_SHA:0:12})"
+            git push origin HEAD:main
+          fi
+
+      - name: Confirmar estrutura copiada
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f apps/backend/package.json
+          test -f apps/storefront/package.json
+          test -f LICENSE
+          echo "O Medusa DTC Starter foi importado com os componentes principais."
